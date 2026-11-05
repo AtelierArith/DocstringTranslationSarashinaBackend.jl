@@ -19,37 +19,43 @@ function _switchlang!(lang::Union{AbstractString,Symbol})
 end
 
 """
-    translate_docstring(md::Markdown.MD) -> Markdown.MD
+    try_translate_docstring(md; translator=default_translator(), lang=DEFAULT_LANG[])
 
-Return the translation of a docstring into `DEFAULT_LANG[]`, using the cache when
-available. `md.meta[:module]` must be set. On API errors, a warning is emitted and
-`md` is returned unchanged.
+Return the translation of a docstring into `lang`, or `nothing` if it cannot be
+translated now (no API key, API error). `md.meta[:module]` must be set.
+Translations are cached on disk per [`translationkey`](@ref).
 """
-function translate_docstring(md::Markdown.MD)
-    lang = DEFAULT_LANG[]
+function try_translate_docstring(
+    md::Markdown.MD;
+    translator::AbstractTranslator = default_translator(),
+    lang::AbstractString = DEFAULT_LANG[],
+)
     lang == SOURCE_LANG[] && return md
-    meta = md.meta
-    if istranslated(md, lang)
-        translated = load_translation(md, lang)
+    key = translationkey(translator, lang)
+    if istranslated(md, key)
+        translated = load_translation(md, key)
     else
-        if default_translator() isa SarashinaTranslator &&
-           default_translator().api_key === nothing && !haskey(ENV, "SARASHINA_API_KEY")
-            return md
-        end
-        hash_original = hashmd(md)
+        canrequest(translator) || return nothing
         translated = try
-            translate_md(md)
+            translate_md(md; translator, target_lang = lang)
         catch e
             @warn "Failed to translate docstring with the Sarashina API; showing the original" exception = e
-            return md
+            return nothing
         end
-        translated.meta = copy(meta)
         cache_original(md)
-        cache_translation(hash_original, translated, lang)
+        cache_translation(hashmd(md), translated, key)
     end
-    merge!(translated.meta, meta)
+    merge!(translated.meta, md.meta)
     translated
 end
+
+"""
+    translate_docstring(md; kwargs...) -> Markdown.MD
+
+Like [`try_translate_docstring`](@ref), but return `md` unchanged when it cannot
+be translated.
+"""
+translate_docstring(md::Markdown.MD; kwargs...) = something(try_translate_docstring(md; kwargs...), md)
 
 # Same as `REPL.formatdoc(::DocStr)`, which is not available when REPL is not loaded
 # (e.g. in scripts and tests).
@@ -72,14 +78,36 @@ function assume_julia_code!(c::Markdown.Code)
     c
 end
 
-function parsedoc_with_translation(d::DocStr)
+# Translated docstrings kept in memory: DocStr => (translation key => translation).
+# `d.object` itself always holds the original (untranslated) document, so that
+# switching the language or the style takes effect on the next lookup.
+const TRANSLATED_DOCS = WeakKeyDict{DocStr,Dict{String,Markdown.MD}}()
+
+function original_doc(d::DocStr)
     if d.object === nothing
-        md = formatdocstr(d)
+        d.object = formatdocstr(d)
+    end
+    md = d.object
+    if md isa Markdown.MD
         md.meta[:module] = d.data[:module]
         md.meta[:path] = d.data[:path]
-        d.object = translate_docstring(md)
     end
-    d.object
+    md
+end
+
+function parsedoc_with_translation(d::DocStr)
+    md = original_doc(d)
+    md isa Markdown.MD || return md
+    lang = DEFAULT_LANG[]
+    lang == SOURCE_LANG[] && return md
+    translator = default_translator()
+    key = translationkey(translator, lang)
+    variants = get!(Dict{String,Markdown.MD}, TRANSLATED_DOCS, d)
+    haskey(variants, key) && return variants[key]
+    translated = try_translate_docstring(md; translator, lang)
+    # Not memoized on failure, so the next lookup retries.
+    translated === nothing && return md
+    variants[key] = translated
 end
 
 """

@@ -3,7 +3,9 @@
 # Layout (same idea as DocstringTranslation.jl):
 #
 #     <cache dir>/<Root>/<major.minor>/<Sub>/.../<sha256 of original>/original.md
-#                                                                    /<lang>.md
+#                                                                    /<key>.md
+#
+# `<key>` identifies the translation variant (see `translationkey`), e.g. `ja-polite`.
 #
 # where `Root.Sub...` is the module that owns the docstring and `major.minor`
 # is its package version (or Julia's `VERSION` for Base/stdlibs).
@@ -55,11 +57,10 @@ function pathofcachedir(md::Markdown.MD, allowold::Bool = false)
     d
 end
 
-translationpath(md::Markdown.MD, hash::AbstractString, lang::AbstractString) =
-    joinpath(pathofcachedir(md, true), hash, lang * ".md")
+translationpath(md::Markdown.MD, hash::AbstractString, key::AbstractString) =
+    joinpath(pathofcachedir(md, true), hash, key * ".md")
 
-istranslated(md::Markdown.MD, lang::AbstractString = DEFAULT_LANG[]) =
-    isfile(translationpath(md, hashmd(md), lang))
+istranslated(md::Markdown.MD, key::AbstractString) = isfile(translationpath(md, hashmd(md), key))
 
 """
     postprocess_content(content)
@@ -71,8 +72,8 @@ function postprocess_content(content::AbstractString)
     replace(content, r"\$\$(.*?)\$\$"s => s"```math\1```")
 end
 
-function load_translation(md::Markdown.MD, lang::AbstractString = DEFAULT_LANG[])
-    path = translationpath(md, hashmd(md), lang)
+function load_translation(md::Markdown.MD, key::AbstractString)
+    path = translationpath(md, hashmd(md), key)
     Markdown.parse(postprocess_content(read(path, String)))
 end
 
@@ -82,8 +83,8 @@ function cache_original(md::Markdown.MD)
     write(joinpath(dir, "original.md"), string(md))
 end
 
-function cache_translation(hash_original::AbstractString, transmd::Markdown.MD, lang::AbstractString = DEFAULT_LANG[])
+function cache_translation(hash_original::AbstractString, transmd::Markdown.MD, key::AbstractString)
     dir = joinpath(pathofcachedir(transmd), hash_original)
     mkpath(dir)
-    write(joinpath(dir, lang * ".md"), string(transmd))
+    write(joinpath(dir, key * ".md"), string(transmd))
 end

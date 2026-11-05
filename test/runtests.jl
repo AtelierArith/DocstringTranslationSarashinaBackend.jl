@@ -16,6 +16,8 @@ using DocstringTranslationSarashinaBackend:
     switchtranslationcachedir!,
     switchstyle!,
     default_translator,
+    translationkey,
+    try_translate_docstring,
     DEFAULT_LANG
 
 """
@@ -42,10 +44,32 @@ end
 DocstringTranslationSarashinaBackend.translate_text(m::Merger, text::AbstractString; kwargs...) =
     (push!(m.calls, text); replace(text, "\n\n" => " "))
 
+"Fake translator whose output and cache key depend on a writing style."
+struct StyledMock <: AbstractTranslator
+    style::String
+    calls::Vector{String}
+end
+DocstringTranslationSarashinaBackend.translate_text(t::StyledMock, text::AbstractString; kwargs...) =
+    (push!(t.calls, text); "[" * t.style * "]" * text)
+DocstringTranslationSarashinaBackend.translationkey(t::StyledMock, lang::AbstractString) = lang * "-" * t.style
+
+"Fake translator that always fails, like an API outage."
+struct FailingTranslator <: AbstractTranslator end
+DocstringTranslationSarashinaBackend.translate_text(::FailingTranslator, ::AbstractString; kwargs...) =
+    error("API outage")
+
 module DocTarget
 "Return the answer."
 answer() = 42
+"Return the question."
+question() = 0
 end
+
+function docstr_of(name::Symbol)
+    multidoc = Base.Docs.meta(DocTarget)[Base.Docs.Binding(DocTarget, name)]
+    first(values(multidoc.docs))
+end
+parsedoc_latest(d) = string(Base.invokelatest(Base.Docs.parsedoc, d))
 
 const SAMPLE = """
     add(x, y)
@@ -174,14 +198,62 @@ More details.
             @test !isempty(readdir(dir))
 
             # Docs.parsedoc is overridden
-            multidoc = Base.Docs.meta(DocTarget)[Base.Docs.Binding(DocTarget, :answer)]
-            docstr = first(values(multidoc.docs))
-            doc = string(Base.invokelatest(Base.Docs.parsedoc, docstr))
-            @test occursin("<Return the answer.>", doc)
+            docstr = docstr_of(:answer)
+            @test occursin("<Return the answer.>", parsedoc_latest(docstr))
+            nreq = length(t.requests)
+
+            # switching the language takes effect on already displayed docstrings
+            @switchlang! "en"
+            @test parsedoc_latest(docstr) == "Return the answer.\n"
+            @switchlang! "ja"
+            @test occursin("<Return the answer.>", parsedoc_latest(docstr))
+            @test length(t.requests) == nreq # memoized, no new request
         finally
             switchtranslator!(old)
             DEFAULT_LANG[] = "en"
         end
+    end
+
+    @testset "retry after failure" begin
+        switchtranslationcachedir!(mktempdir())
+        old = default_translator()
+        try
+            @switchlang! "ja"
+            docstr = docstr_of(:question)
+            switchtranslator!(FailingTranslator())
+            @test_logs (:warn,) match_mode = :any begin
+                @test parsedoc_latest(docstr) == "Return the question.\n"
+            end
+            t = MockTranslator()
+            switchtranslator!(t)
+            @test occursin("<Return the question.>", parsedoc_latest(docstr))
+            @test length(t.requests) == 1
+        finally
+            switchtranslator!(old)
+            DEFAULT_LANG[] = "en"
+        end
+    end
+
+    @testset "writing style is part of the cache key" begin
+        @test translationkey(SarashinaTranslator(style = "polite"), "ja") == "ja-polite"
+        @test translationkey(SarashinaTranslator(style = "plain"), "ja") == "ja-plain"
+        @test translationkey(SarashinaTranslator(style = "polite"), "en") == "en"
+
+        dir = mktempdir()
+        switchtranslationcachedir!(dir)
+        md = Markdown.parse("Compute the inverse.")
+        md.meta[:module] = Base
+        plain = StyledMock("plain", String[])
+        polite = StyledMock("polite", String[])
+        @test occursin("[plain]", string(try_translate_docstring(md; translator = plain, lang = "ja")))
+        # a different style is not served from the cache of another style
+        @test occursin("[polite]", string(try_translate_docstring(md; translator = polite, lang = "ja")))
+        @test length(polite.calls) == 1
+        # each style is cached separately
+        @test occursin("[plain]", string(try_translate_docstring(md; translator = plain, lang = "ja")))
+        @test length(plain.calls) == 1
+        files = [f for (_, _, fs) in walkdir(dir) for f in fs]
+        @test "ja-plain.md" in files && "ja-polite.md" in files
     end
 
     @testset "switchstyle!" begin
