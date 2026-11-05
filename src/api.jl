@@ -89,6 +89,24 @@ Replace the default translator, e.g. `switchtranslator!(SarashinaTranslator(styl
 """
 switchtranslator!(t::AbstractTranslator) = (DEFAULT_TRANSLATOR[] = t)
 
+"""
+    translationkey(translator, target_lang) -> String
+
+Identifier of a translation variant, used as the cache key. Translations that
+differ in writing style must have different keys.
+"""
+translationkey(::AbstractTranslator, target_lang::AbstractString) = String(target_lang)
+translationkey(t::SarashinaTranslator, target_lang::AbstractString) =
+    target_lang == "ja" ? "$(target_lang)-$(t.style)" : String(target_lang)
+
+"""
+    canrequest(translator) -> Bool
+
+Whether `translator` is ready to send requests (e.g. an API key is available).
+"""
+canrequest(::AbstractTranslator) = true
+canrequest(t::SarashinaTranslator) = t.api_key !== nothing || haskey(ENV, "SARASHINA_API_KEY")
+
 function validate_langs(source_lang::AbstractString, target_lang::AbstractString)
     source_lang in SUPPORTED_LANGS ||
         throw(ArgumentError("source_lang must be one of $(SUPPORTED_LANGS), got $(repr(source_lang))"))

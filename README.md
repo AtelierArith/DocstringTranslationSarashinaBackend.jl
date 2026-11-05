@@ -37,8 +37,10 @@ help?> clamp
 
 `@switchlang!` overrides `Docs.parsedoc`, so every docstring is translated the
 first time it is displayed. Translations are cached in this package's scratch
-space (`<module>/<major.minor>/<sha256>/ja.md`), so each docstring is sent to the
-API only once.
+space (`<module>/<major.minor>/<sha256>/ja-<style>.md`), so each docstring is sent
+to the API only once per writing style. Calling `@switchlang!` or `switchstyle!`
+again takes effect on docstrings that were already displayed, and docstrings that
+could not be translated (no API key, API error) are retried on the next lookup.
 
 ### Japanese style (beta)
 
