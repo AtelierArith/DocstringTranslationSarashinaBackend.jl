@@ -13,10 +13,9 @@ module DocstringTranslationSarashinaBackend
 
 using Base.Docs: DocStr
 
-using HTTP
-using JSON
 using Markdown
 using SHA
+using Sarashina
 using Scratch
 
 const SUPPORTED_LANGS = ("ja", "en")

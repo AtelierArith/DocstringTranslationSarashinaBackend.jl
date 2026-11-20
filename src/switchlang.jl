@@ -8,7 +8,7 @@ function switchstyle!(style::AbstractString)
     t = default_translator()
     t isa SarashinaTranslator ||
         throw(ArgumentError("switchstyle! requires the default translator to be a SarashinaTranslator"))
-    switchtranslator!(SarashinaTranslator(t.api_key, t.endpoint, String(style), t.max_retries, t.readtimeout))
+    switchtranslator!(SarashinaTranslator(t.api_key, t.base_url, String(style), t.max_retries, t.readtimeout))
 end
 
 function _switchlang!(lang::Union{AbstractString,Symbol})
