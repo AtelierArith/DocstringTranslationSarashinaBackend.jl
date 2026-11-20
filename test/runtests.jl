@@ -1,6 +1,8 @@
 using Test
 using Markdown
 using DotEnv
+using HTTP
+using Sarashina: SarashinaError
 
 # Load SARASHINA_API_KEY from <package root>/.env if present (used by the live API tests).
 const DOTENV_PATH = joinpath(dirname(@__DIR__), ".env")
@@ -8,9 +10,7 @@ isfile(DOTENV_PATH) && DotEnv.load!(DOTENV_PATH)
 using DocstringTranslationSarashinaBackend
 using DocstringTranslationSarashinaBackend:
     AbstractTranslator,
-    SarashinaAPIError,
     split_text,
-    request_body,
     translate_docstring,
     switchtranslator!,
     switchtranslationcachedir!,
@@ -166,12 +166,50 @@ More details.
     @testset "SarashinaTranslator" begin
         @test_throws ArgumentError SarashinaTranslator(style = "casual")
         t = SarashinaTranslator(api_key = "dummy", style = "plain")
-        b = request_body(t, "Hello", "en", "ja")
-        @test occursin("\"style\":\"plain\"", b)
-        @test !occursin("style", request_body(t, "こんにちは", "ja", "en"))
         @test translate_text(t, "Hello"; source_lang = "en", target_lang = "en") == "Hello"
         @test_throws ArgumentError translate_text(t, "Hello"; source_lang = "en", target_lang = "zh")
-        @test occursin("SARASHINA_API_KEY", sprint(showerror, SarashinaAPIError(401, "Unauthorized")))
+        @test occursin("SARASHINA_API_KEY", sprint(showerror, SarashinaError(401, "Unauthorized")))
+    end
+
+    @testset "requests via Sarashina.jl (mock server)" begin
+        seen = Any[]
+        responder = Ref{Function}(req -> HTTP.Response(200, "{\"translated_text\":\"ok\"}"))
+        server = HTTP.serve!("127.0.0.1", 0; verbose = -1) do req
+            push!(seen, (target = req.target, auth = HTTP.header(req, "Authorization"), body = String(copy(req.body))))
+            Base.invokelatest(responder[], req)
+        end
+        try
+            base = "http://127.0.0.1:$(Int(HTTP.port(server)))"
+            t = SarashinaTranslator(api_key = "k", base_url = base, style = "plain", max_retries = 1)
+
+            @test translate_text(t, "Hello"; source_lang = "en", target_lang = "ja") == "ok"
+            @test seen[end].target == "/v1/translate"
+            @test seen[end].auth == "Bearer k"
+            @test occursin("\"style\":\"plain\"", seen[end].body)
+            @test occursin("\"target_lang\":\"ja\"", seen[end].body)
+
+            # style is not sent when translating into English
+            translate_text(t, "こんにちは"; source_lang = "ja", target_lang = "en")
+            @test !occursin("style", seen[end].body)
+
+            # long text is split into several requests and joined
+            empty!(seen)
+            long = join(fill("Hello world.\n\n", 800))
+            @test length(long) > 5000
+            translate_text(t, long; source_lang = "en", target_lang = "ja")
+            @test length(seen) == length(split_text(long, 5000)) >= 2
+
+            # transient 5xx is retried; other errors raise SarashinaError
+            n = Ref(0)
+            responder[] = req -> (n[] += 1; n[] < 2 ? HTTP.Response(503, "busy") : HTTP.Response(200, "{\"translated_text\":\"again\"}"))
+            @test translate_text(t, "Hello"; source_lang = "en", target_lang = "ja") == "again"
+            @test n[] == 2
+            responder[] = req -> HTTP.Response(401, "{\"message\":\"bad key\"}")
+            err = try translate_text(t, "Hello"; source_lang = "en", target_lang = "ja"); nothing catch e; e end
+            @test err isa SarashinaError && err.status == 401 && err.message == "bad key"
+        finally
+            close(server)
+        end
     end
 
     @testset "@switchlang! and cache" begin

@@ -1,4 +1,3 @@
-const SARASHINA_TRANSLATE_ENDPOINT = "https://api.sarashina.ai/v1/translate"
 "Maximum number of characters (Unicode code points) accepted by one translate request."
 const MAX_TEXT_LENGTH = 5000
 
@@ -12,59 +11,42 @@ Supertype of translation backends. A subtype `T` must implement
 abstract type AbstractTranslator end
 
 """
-    SarashinaAPIError(status, message)
-
-Error returned by the Sarashina API (non-2xx HTTP status).
-"""
-struct SarashinaAPIError <: Exception
-    status::Int
-    message::String
-end
-
-function Base.showerror(io::IO, e::SarashinaAPIError)
-    print(io, "SarashinaAPIError: HTTP ", e.status, ": ", e.message)
-    if e.status == 401
-        print(io, "\nCheck that ENV[\"SARASHINA_API_KEY\"] holds a valid API key ",
-            "(issue one at https://chat.sarashina.ai/dashboard/api-keys).")
-    elseif e.status == 403
-        print(io, "\nThe Sarashina API rejects access from outside Japan.")
-    end
-end
-
-"""
-    SarashinaTranslator(; api_key=nothing, endpoint=SARASHINA_TRANSLATE_ENDPOINT,
+    SarashinaTranslator(; api_key=nothing, base_url=Sarashina.DEFAULT_BASE_URL,
                           style="auto", max_retries=5, readtimeout=120)
 
-Translator backed by the Sarashina translate API (`sarashina3.2-translate`).
+Translator backed by the Sarashina translate API (`sarashina3.2-translate`),
+called through [Sarashina.jl](https://github.com/AtelierArith/Sarashina.jl).
+Failed requests raise `Sarashina.SarashinaError`.
 
 - `api_key`: API key. When `nothing`, `ENV["SARASHINA_API_KEY"]` is read at request time.
 - `style`: Japanese writing style, one of `"auto"`, `"plain"` (だ・である調) or
   `"polite"` (です・ます調). Only used when the target language is `"ja"`.
 - `max_retries`: retries on HTTP 429 (honoring `Retry-After`) and 5xx responses.
+- `readtimeout`: seconds without incoming data before a request fails.
 """
 struct SarashinaTranslator <: AbstractTranslator
     api_key::Union{Nothing,String}
-    endpoint::String
+    base_url::String
     style::String
     max_retries::Int
     readtimeout::Int
-    function SarashinaTranslator(api_key, endpoint, style, max_retries, readtimeout)
+    function SarashinaTranslator(api_key, base_url, style, max_retries, readtimeout)
         style in SUPPORTED_STYLES ||
             throw(ArgumentError("style must be one of $(SUPPORTED_STYLES), got $(repr(style))"))
         max_retries >= 0 || throw(ArgumentError("max_retries must be non-negative"))
-        new(api_key, endpoint, style, max_retries, readtimeout)
+        new(api_key, base_url, style, max_retries, readtimeout)
     end
 end
 
 function SarashinaTranslator(;
     api_key::Union{Nothing,AbstractString} = nothing,
-    endpoint::AbstractString = get(ENV, "SARASHINA_TRANSLATE_ENDPOINT", SARASHINA_TRANSLATE_ENDPOINT),
+    base_url::AbstractString = Sarashina.DEFAULT_BASE_URL,
     style::AbstractString = "auto",
     max_retries::Integer = 5,
     readtimeout::Integer = 120,
 )
     key = api_key === nothing ? nothing : String(api_key)
-    SarashinaTranslator(key, String(endpoint), String(style), Int(max_retries), Int(readtimeout))
+    SarashinaTranslator(key, String(base_url), String(style), Int(max_retries), Int(readtimeout))
 end
 
 function apikey(t::SarashinaTranslator)
@@ -164,47 +146,21 @@ function split_text(text::AbstractString, limit::Integer)
     chunks
 end
 
-function request_body(t::SarashinaTranslator, text, source_lang, target_lang)
-    body = Dict{String,Any}("text" => text, "source_lang" => source_lang, "target_lang" => target_lang)
-    # `style` only applies when translating into Japanese.
-    target_lang == "ja" && (body["style"] = t.style)
-    JSON.json(body)
-end
+"""
+    client(t::SarashinaTranslator) -> Sarashina.Client
 
-function error_message(body::AbstractString)
-    try
-        d = JSON.parse(body)
-        return string(get(d, "message", body))
-    catch
-        return String(body)
-    end
-end
-
-function retry_after_seconds(resp)
-    v = HTTP.header(resp, "Retry-After", "")
-    s = tryparse(Int, strip(v))
-    s === nothing ? 60 : clamp(s, 1, 120)
-end
+Build the API client for `t`. The API key is resolved at request time, so that a
+translator can be created before `ENV["SARASHINA_API_KEY"]` is set.
+"""
+client(t::SarashinaTranslator) = Sarashina.Client(;
+    api_key = apikey(t),
+    base_url = t.base_url,
+    max_retries = t.max_retries,
+    read_idle_timeout = t.readtimeout,
+)
 
 function request_translation(t::SarashinaTranslator, text::AbstractString, source_lang, target_lang)
-    headers = ["Authorization" => "Bearer $(apikey(t))", "Content-Type" => "application/json"]
-    body = request_body(t, text, source_lang, target_lang)
-    attempt = 0
-    while true
-        resp = HTTP.post(t.endpoint, headers, body; status_exception = false, read_idle_timeout = t.readtimeout)
-        status = Int(resp.status)
-        if 200 <= status < 300
-            return string(JSON.parse(String(resp.body))["translated_text"])
-        end
-        msg = error_message(String(resp.body))
-        retryable = status == 429 || status in (500, 502, 503, 504)
-        if retryable && attempt < t.max_retries
-            wait = status == 429 ? retry_after_seconds(resp) : min(2.0^attempt, 30.0)
-            @debug "Sarashina API returned $(status); retrying in $(wait) s" msg
-            sleep(wait)
-            attempt += 1
-            continue
-        end
-        throw(SarashinaAPIError(status, msg))
-    end
+    # `style` only applies when translating into Japanese.
+    style = target_lang == "ja" ? t.style : nothing
+    Sarashina.translate(client(t), text; source_lang, target_lang, style)
 end

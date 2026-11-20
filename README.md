@@ -4,6 +4,8 @@ Translate Julia docstrings into Japanese with the
 [Sarashina translate API](https://docs.sarashina.ai/api-reference/translate)
 (`sarashina3.2-translate`). Inspired by
 [DocstringTranslation.jl](https://github.com/AtelierArith/DocstringTranslation.jl).
+API requests are sent with [Sarashina.jl](https://github.com/AtelierArith/Sarashina.jl)
+(not yet registered; it is resolved through `[sources]` in `Project.toml`, which needs Julia 1.13).
 
 ## Setup
 
@@ -78,7 +80,8 @@ Markdown structure is protected on the client side:
 - Paragraphs of one docstring are batched into a single request (≤ 4000
   characters; the API limit is 5000) because of the 30 requests/minute rate
   limit. HTTP 429 responses are retried after `Retry-After`; 5xx responses are
-  retried with exponential backoff.
+  retried with exponential backoff (both handled by Sarashina.jl). Failed
+  requests raise `Sarashina.SarashinaError`.
 - If a translated paragraph cannot be mapped back safely (e.g. a placeholder was
   dropped), the original paragraph is kept.
 
